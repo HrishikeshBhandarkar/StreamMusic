@@ -1,0 +1,1230 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hybrid Sync Player (Final Fixed)</title>
+    
+    <script src="https://unpkg.com/browser-id3-writer@4.0.0/dist/browser-id3-writer.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/shaka-player.compiled.js"></script>
+    
+    <style>
+        /* =========================================
+           1. CORE THEME & LAYOUT
+           ========================================= */
+        body {
+            margin: 0; height: 100vh; background: #000; color: white;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow: hidden;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* --- BACKGROUND LAYERS --- */
+        #bg-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-size: cover; background-position: center;
+            filter: blur(60px) brightness(0.3); z-index: -2;
+            transition: background-image 0.5s, filter 0.3s, opacity 0.5s;
+        }
+        #living-bg {
+            position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+            z-index: -1; opacity: 0; transition: opacity 1.5s ease;
+            pointer-events: none; overflow: hidden;
+        }
+        body.lyrics-active #living-bg { opacity: 1; }
+        body.lyrics-active #bg-layer { opacity: 0.3; }
+        body.hide-graphics #bg-layer, body.hide-graphics #living-bg { opacity: 0 !important; display: none !important; }
+
+        /* Animated Blobs */
+        .live-blob {
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            background-size: cover; background-position: center;
+            border-radius: 50%;
+            filter: blur(80px) saturate(1.8) brightness(0.8);
+            opacity: 0.7;
+            animation-timing-function: linear; animation-iteration-count: infinite;
+            transition: filter 0.3s;
+        }
+        #blob-1 { animation: rotateBlob1 30s infinite; mix-blend-mode: screen; }
+        #blob-2 { animation: rotateBlob2 45s infinite reverse; mix-blend-mode: overlay; }
+
+        @keyframes rotateBlob1 {
+            0% { transform: rotate(0deg) scale(1.2) translate(5%, 5%); }
+            50% { transform: rotate(180deg) scale(1.5) translate(-5%, -5%); }
+            100% { transform: rotate(360deg) scale(1.2) translate(5%, 5%); }
+        }
+        @keyframes rotateBlob2 {
+            0% { transform: rotate(0deg) scale(1.4) translate(-5%, 5%); }
+            50% { transform: rotate(180deg) scale(1.1) translate(5%, -5%); }
+            100% { transform: rotate(360deg) scale(1.4) translate(-5%, 5%); }
+        }
+
+        /* =========================================
+           2. STAGE & VIEWS
+           ========================================= */
+        #stage { 
+            width: 100%; height: 100%; padding-bottom: 140px; 
+            box-sizing: border-box; position: relative; 
+            display: flex; align-items: center; justify-content: center;
+            perspective: 1000px;
+        }
+        .view-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            padding-bottom: 140px; box-sizing: border-box;
+            transition: all 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+            backface-visibility: hidden;
+        }
+        
+        #art-view { transform-origin: center bottom; opacity: 1; transform: scale(1) translateY(0); z-index: 10; }
+        body.lyrics-active #art-view { opacity: 0; transform: scale(0.5) translateY(-50px); pointer-events: none; }
+        
+        #art-img { 
+            width: 75vw; height: 75vw; max-width: 320px; max-height: 320px; 
+            object-fit: cover; border-radius: 12px; 
+            box-shadow: 0 20px 50px rgba(0,0,0,0.6); display: none; 
+        }
+        .placeholder { 
+            width: 75vw; height: 75vw; max-width: 320px; max-height: 320px; 
+            background: rgba(255,255,255,0.08); border-radius: 12px; 
+            display: flex; flex-direction: column; align-items: center; justify-content: center; 
+            color: #fff; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); 
+        }
+        
+        #lyrics-view { opacity: 0; transform: scale(0.95) translateY(20px); pointer-events: none; z-index: 5; }
+        body.lyrics-active #lyrics-view { opacity: 1; transform: scale(1) translateY(0); pointer-events: auto; }
+
+        #lyrics-scroll {
+            width: 100%; height: 100%; overflow-y: auto; 
+            padding: 50vh 24px; box-sizing: border-box; 
+            display: flex; flex-direction: column; gap: 12px; 
+            scroll-behavior: smooth; 
+            mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+            -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+        }
+        #lyrics-scroll::-webkit-scrollbar { display: none; }
+
+        /* =========================================
+           3. LYRICS TYPOGRAPHY (CRITICAL FIXES)
+           ========================================= */
+        .l-row {
+            display: flex; 
+            flex-direction: column; /* Stacks bubble on top of BG lyrics */
+            width: 100%; margin: 0; padding: 12px 16px; 
+            cursor: pointer; min-height: min-content; flex-shrink: 0; 
+            font-size: 26px; line-height: 1.4; font-weight: 700; 
+            color: rgba(255, 255, 255, 0.45); opacity: 0.5; filter: blur(1.5px); 
+            transform: scale(0.98); transform-origin: left center;
+            box-sizing: border-box; transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            letter-spacing: -0.015em; border-radius: 12px;
+        }
+        
+        /* ALIGNMENT CLASSES */
+        .l-row.v1 { align-items: flex-start; text-align: left; }
+        .l-row.v2 { align-items: flex-end; text-align: right; }
+        .l-row.v3 { align-items: flex-start; text-align: left; } 
+
+        .l-row:hover { background: rgba(255,255,255,0.05); }
+        
+        body.no-gloom .l-row { filter: none !important; text-shadow: none !important; }
+        .mode-standard .l-row.active { color: #ffffff !important; opacity: 1 !important; filter: blur(0px) !important; font-weight: 800; transform: scale(1); }
+        .mode-enhanced .l-row.active { opacity: 1 !important; filter: blur(0px) !important; transform: scale(1); }
+
+        .mode-enhanced .k-word {
+            display: inline-block; /* Fixes "word per line" */
+            white-space: pre-wrap; position: relative;
+            transform-origin: center bottom; padding-top: 15px; margin-top: -15px;
+            overflow: visible; vertical-align: bottom; 
+            color: rgba(255,255,255,0.45); 
+            
+            background-image: linear-gradient(90deg, #ffffff calc(var(--p) - 10%), rgba(255,255,255,0.45) calc(var(--p) + 5%));
+            background-size: 100% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; 
+            --p: 0%; will-change: transform, opacity, filter, text-shadow; 
+            
+            /* THE 0.32s ANIMATION */
+            transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease; 
+        }
+        
+        .mode-enhanced .k-word.sung { background: none; -webkit-text-fill-color: #ffffff; color: #ffffff; text-shadow: none !important; }
+        .mode-standard .k-word { display: inline; background: none; -webkit-text-fill-color: initial; color: inherit; }
+
+        /* BUBBLE FIX: Inline-block wraps text naturally */
+        .bubble { 
+            display: inline-block; 
+            max-width: 100%; 
+            background: none; padding: 0; 
+        }
+        
+        .l-row.break { height: 0; padding: 0; opacity: 0; overflow: hidden; transition: all 0.5s; }
+        .l-row.break.active { height: 40px; opacity: 1; margin: 20px 0; }
+        
+        /* BG Lines */
+        .bg-line { 
+            display: block; max-height: 0; opacity: 0; overflow: hidden; 
+            font-size: 0.65em; color: rgba(255,255,255,0.8); font-weight: 600; 
+            margin-top: 0; transform: translateY(-5px); 
+            transition: max-height 0.3s ease-out, opacity 0.2s ease, margin 0.2s ease, transform 0.3s ease; 
+        }
+        .bg-line.visible { max-height: 100px; opacity: 1; margin-top: 8px; transform: translateY(0); }
+
+        /* =========================================
+           4. UI CONTROLS
+           ========================================= */
+        #ui { 
+            width: 90%; max-width: 400px; position: absolute; bottom: 40px; 
+            background-color: rgba(30, 30, 30, 0.75); backdrop-filter: blur(50px) saturate(180%); 
+            -webkit-backdrop-filter: blur(50px) saturate(180%);
+            border-radius: 32px; padding: 24px; 
+            display: flex; flex-direction: column; gap: 16px; 
+            border: 1px solid rgba(255,255,255,0.12); 
+            box-shadow: 0 30px 60px rgba(0,0,0,0.5); z-index: 100; 
+        }
+        #title-container { text-align: center; overflow: hidden; }
+        #title { font-weight: 700; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; letter-spacing: -0.01em; margin-bottom: 4px; }
+        #status-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+        #status { font-size: 11px; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+        
+        #tech-info { 
+            font-size: 10px; padding: 2px 6px; border-radius: 4px; 
+            font-family: monospace; font-weight: 700; display:none; 
+            transition: color 0.3s, background-color 0.3s; 
+        }
+        
+        input[type="range"] { width: 100%; accent-color: white; height: 4px; border-radius: 2px; cursor: pointer; background: rgba(255,255,255,0.2); -webkit-appearance: none; }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #fff; }
+        input[type="checkbox"] { width: 20px; height: 20px; accent-color: white; cursor: pointer; }
+        
+        .btn-row { display: flex; justify-content: center; gap: 24px; align-items: center; margin-top: 8px; }
+        button { background: none; border: none; color: white; cursor: pointer; transition: transform 0.1s; opacity: 0.9; display: flex; align-items: center; justify-content: center; padding: 0; outline: none; -webkit-tap-highlight-color: transparent; }
+        button:active { transform: scale(0.85); }
+        
+        .icon { width: 24px; height: 24px; fill: white; }
+        .icon-lg { width: 36px; height: 36px; fill: white; }
+        .icon-sm { width: 20px; height: 20px; fill: white; }
+        
+        #toggleViewBtn { background: rgba(255,255,255,0.15); width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+        #gloomBtn { opacity: 0.5; }
+        #gloomBtn.active-gloom { opacity: 1; }
+        #gloomBtn.active-gloom .icon { fill: #FFE600; filter: drop-shadow(0 0 8px rgba(255,230,0,0.6)); }
+        
+        .unsynced-text { text-align: center; font-size: 20px; line-height: 1.8; color: #ddd; padding: 20px; white-space: pre-wrap; font-weight: 500;}
+        
+        /* Icons on the UI Panel */
+        .top-icon { position: absolute; top: 24px; cursor: pointer; opacity: 0.5; transition: opacity 0.2s; -webkit-tap-highlight-color: transparent; z-index: 101; }
+        .top-icon:hover { opacity: 1; }
+        
+        #settings-btn-icon { left: 24px; }
+        #settings-btn-icon:hover { transform: rotate(45deg); transition: 0.4s; }
+        
+        /* Moved Thumbs Down Icon (Near Settings) */
+        #bad-lyrics-btn-icon { left: 64px; }
+        #bad-lyrics-btn-icon:active { transform: scale(0.9); }
+
+        #edit-btn-icon { right: 24px; }
+        #download-btn-icon { right: 64px; }
+        #search-btn-icon { right: 104px; }
+        
+        /* =========================================
+           5. MODALS
+           ========================================= */
+        .modal-overlay { 
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; 
+            background: rgba(0,0,0,0.85); z-index: 2000; 
+            display: none; flex-direction: column; align-items: center; justify-content: center; 
+            backdrop-filter: blur(20px); 
+        }
+        
+        #edit-modal textarea { width: 85%; height: 50%; background: #1c1c1e; color: #fff; border: 1px solid #333; border-radius: 15px; padding: 20px; font-family: monospace; font-size: 13px; margin-bottom: 25px; resize: none; outline: none; }
+        .modal-btns { display: flex; gap: 15px; }
+        .modal-btn { background: white; color: black; padding: 12px 30px; border-radius: 30px; font-weight: bold; cursor: pointer; font-size: 14px; }
+        .modal-btn.cancel { background: transparent; color: white; border: 1px solid #555; }
+
+        /* Search Modal */
+        #search-input { width: 85%; max-width: 300px; padding: 15px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.1); color: #fff; font-size: 16px; outline: none; margin-bottom: 20px; text-align: center; }
+        #search-input::placeholder { color: rgba(255,255,255,0.4); }
+        
+        #search-results-container {
+            width: 90%; max-width: 350px; max-height: 50%; overflow-y: auto;
+            background: rgba(30,30,30,0.8); border-radius: 16px;
+            display: none; flex-direction: column; gap: 10px; padding: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .search-result-item {
+            display: flex; align-items: center; gap: 12px;
+            padding: 10px; border-radius: 10px; cursor: pointer;
+            transition: background 0.2s;
+        }
+        .search-result-item:hover { background: rgba(255,255,255,0.1); }
+        .res-img { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: #333; }
+        .res-info { display: flex; flex-direction: column; overflow: hidden; }
+        .res-title { font-size: 14px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .res-artist { font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        /* Sources Modal */
+        #sources-list { width: 90%; max-width: 350px; display: flex; flex-direction: column; gap: 10px; }
+        .source-btn { 
+            background: rgba(255,255,255,0.1); color: #fff; padding: 15px; border-radius: 12px; 
+            text-align: left; font-family: monospace; font-size: 13px; cursor: pointer;
+            border: 1px solid transparent; transition: 0.2s;
+        }
+        .source-btn:hover { background: rgba(255,255,255,0.2); }
+        .source-btn.active-source { border-color: #00ff00; background: rgba(0,255,0,0.1); }
+
+        /* Settings Card */
+        .settings-card { width: 85%; max-width: 350px; background: rgba(30, 30, 30, 0.95); border: 1px solid rgba(255,255,255,0.1); border-radius: 24px; padding: 30px; display: flex; flex-direction: column; gap: 25px; }
+        .setting-row { display: flex; flex-direction: column; gap: 10px; }
+        .setting-label { display: flex; justify-content: space-between; font-size: 14px; font-weight: 600; color: #ddd; }
+        .setting-val { color: #aaa; font-family: monospace; }
+        .setting-slider { -webkit-appearance: none; width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; outline: none; }
+        .setting-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; cursor: pointer; box-shadow: 0 0 10px rgba(255,255,255,0.5); }
+        select.setting-input { width: 100%; background: rgba(255,255,255,0.1); color: white; border: none; padding: 10px; border-radius: 8px; font-size: 14px; outline: none; }
+        select.setting-input option { background: #222; color: white; }
+        .action-btns { display: flex; gap: 10px; margin-top: 10px; }
+        .s-btn { flex: 1; padding: 12px; border-radius: 12px; font-weight: 600; font-size: 14px; text-align: center; cursor: pointer; transition: 0.2s; }
+        .s-close { background: #fff; color: #000; }
+        .s-reset { background: rgba(255,50,50,0.15); color: #ff5555; }
+
+    </style>
+</head>
+<body>
+
+    <div id="bg-layer"></div>
+    <div id="living-bg"><div id="blob-1" class="live-blob"></div><div id="blob-2" class="live-blob"></div></div>
+
+    <div id="stage">
+        <div id="art-view" class="view-layer">
+            <img id="art-img">
+            <div class="placeholder" id="art-ph">
+                <svg class="icon" style="width:64px; height:64px; opacity:0.6; margin-bottom:16px;" viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                <div style="font-weight:600; opacity:0.8;">Select Music</div>
+                <div style="font-size:13px; opacity:0.5; margin-top:5px;">Tap Search</div>
+            </div>
+        </div>
+
+        <div id="lyrics-view" class="view-layer">
+            <div id="lyrics-scroll">
+                <div style="text-align:center; color:rgba(255,255,255,0.3); font-weight:700; margin-top: 20px; font-size:18px;">Lyrics</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="ui">
+        <div id="settings-btn-icon" class="top-icon" onclick="openSettings()"><svg class="icon-sm" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></div>
+        
+        <div id="bad-lyrics-btn-icon" class="top-icon" title="Wrong Lyrics?">
+            <svg class="icon-sm" viewBox="0 0 24 24"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
+        </div>
+
+        <div id="search-btn-icon" class="top-icon" onclick="openSearch()"><svg class="icon-sm" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></div>
+        <div id="download-btn-icon" class="top-icon" onclick="downloadTrack()"><svg class="icon-sm" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></div>
+        <div id="edit-btn-icon" class="top-icon" onclick="openEdit()"><svg class="icon-sm" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></div>
+        
+        <div id="title-container">
+            <div id="title">Select Music</div>
+            <div id="status-row">
+                <span id="tech-info"></span>
+                <span id="status">Ready</span>
+            </div>
+        </div>
+
+        <input type="range" id="seek" value="0" min="0" max="100">
+        
+        <div class="btn-row">
+            <button onclick="skip(-5)"><svg class="icon" viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg></button>
+            <button id="playBtn" onclick="togglePlay()">
+                <svg id="icon-play" class="icon-lg" viewBox="0 0 24 24" style="display:block;"><path d="M8 5v14l11-7z"/></svg>
+                <svg id="icon-pause" class="icon-lg" viewBox="0 0 24 24" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+            </button>
+            <button onclick="skip(5)"><svg class="icon" viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg></button>
+            <button id="gloomBtn" class="active-gloom" onclick="toggleGloom()"><svg class="icon-sm" viewBox="0 0 24 24"><path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7zm2.85 11.1l-.85.6V16h-4v-2.3l-.85-.6C7.8 12.16 7 10.63 7 9c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.63-.8 3.16-2.15 4.1z"/></svg></button>
+            <button id="toggleViewBtn" onclick="toggleView()">
+                <svg id="icon-msg" class="icon-sm" viewBox="0 0 24 24" style="display:block;"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/></svg>
+                <svg id="icon-art" class="icon-sm" viewBox="0 0 24 24" style="display:none;"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+            </button>
+        </div>
+    </div>
+
+    <div id="search-modal" class="modal-overlay">
+        <h3 style="margin-bottom:15px; color:#fff;">Search HiFi</h3>
+        <input id="search-input" type="text" placeholder="Song Name OR YouTube Link..." onkeypress="handleSearch(event)">
+        <div id="search-results-container"></div>
+        <div class="modal-btns">
+            <div class="modal-btn cancel" onclick="closeSearch()">Cancel</div>
+            <div class="modal-btn" onclick="triggerSearch()">Search</div>
+        </div>
+        <div id="loading-msg" style="margin-top:10px; display:none; color:#aaa; font-size:12px;">Searching...</div>
+    </div>
+
+    <div id="sources-modal" class="modal-overlay">
+        <h3 style="margin-bottom:15px; color:#fff;">Select Lyrics Source</h3>
+        <div id="sources-list"></div>
+        <div class="modal-btns" style="margin-top:20px;">
+            <div class="modal-btn cancel" onclick="closeSources()">Close</div>
+        </div>
+    </div>
+
+    <div id="edit-modal" class="modal-overlay">
+        <h3 style="margin-bottom:15px; color:#fff;">LRC Editor</h3>
+        <textarea id="lrc-input" placeholder="[00:12.34] Paste your LRC content here..."></textarea>
+        <div class="modal-btns">
+            <div class="modal-btn cancel" onclick="closeEdit()">Cancel</div>
+            <div class="modal-btn" onclick="saveEdit()">Load Lyrics</div>
+        </div>
+    </div>
+
+    <div id="settings-modal" class="modal-overlay">
+        <div class="settings-card">
+            <h3 style="margin:0; text-align:center; color:#fff;">Playback Settings</h3>
+            
+            <div class="setting-row">
+                <div class="setting-label"><span>Streaming Quality</span></div>
+                <select id="set-quality" class="setting-input" onchange="updateQuality()">
+                    <option value="HI_RES_LOSSLESS" selected>Hi-Res Lossless (Max)</option>
+                    <option value="LOSSLESS">Lossless (CD Quality)</option>
+                    <option value="HIGH">High (320kbps)</option>
+                    <option value="LOW">Low (96kbps)</option>
+                </select>
+            </div>
+
+            <div class="setting-row">
+                <div class="setting-label"><span>Speed</span><span id="disp-speed" class="setting-val">1.0x</span></div>
+                <input type="range" class="setting-slider" id="set-speed" min="0.5" max="2.0" step="0.05" value="1.0" oninput="updateSpeed()">
+            </div>
+            <div class="setting-row">
+                <div class="setting-label"><span>Sync Offset (Latency)</span><span id="disp-offset" class="setting-val">+0.05s</span></div>
+                <input type="range" class="setting-slider" id="set-offset" min="-0.5" max="0.5" step="0.05" value="0.05" oninput="updateOffset()">
+            </div>
+            <div class="setting-row">
+                <div class="setting-label"><span>Background Intensity</span><span id="disp-blur" class="setting-val">Medium</span></div>
+                <input type="range" class="setting-slider" id="set-blur" min="0" max="100" step="10" value="60" oninput="updateBlur()">
+            </div>
+            <div class="setting-row" style="flex-direction:row; align-items:center; justify-content:space-between; margin-top:5px;">
+                <span class="setting-label">Show Background Graphics</span>
+                <input type="checkbox" id="set-bg-toggle" checked onchange="toggleBgGraphics()">
+            </div>
+            <div class="action-btns">
+                <div class="s-btn s-reset" onclick="resetSettings()">Reset</div>
+                <div class="s-btn s-close" onclick="closeSettings()">Done</div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // --- VARIABLES & SETUP ---
+    const audio = new Audio();
+    audio.crossOrigin = "anonymous"; 
+    
+    // UI Elements
+    const lScroll = document.getElementById('lyrics-scroll');
+    const statusLbl = document.getElementById('status');
+    const techInfo = document.getElementById('tech-info');
+    const seekSlider = document.getElementById('seek');
+    const editModal = document.getElementById('edit-modal');
+    const settingsModal = document.getElementById('settings-modal');
+    const searchModal = document.getElementById('search-modal');
+    const sourcesModal = document.getElementById('sources-modal');
+    const searchResultsContainer = document.getElementById('search-results-container');
+    const lrcInput = document.getElementById('lrc-input');
+    const iconMsg = document.getElementById('icon-msg');
+    const iconArt = document.getElementById('icon-art');
+    const iconPlay = document.getElementById('icon-play');
+    const iconPause = document.getElementById('icon-pause');
+    const gloomBtn = document.getElementById('gloomBtn');
+    const badLyricsBtn = document.getElementById('bad-lyrics-btn-icon');
+    
+    // State
+    let lyricsData = [];
+    let isDragging = false; 
+    let latencyOffset = 0.05; 
+    let isEnhanced = false;
+    let isLyricsMode = false;
+    let isGloomActive = true;
+    let currentQuality = "HI_RES_LOSSLESS"; 
+    const TIME_THRESHOLD = 0.37;
+    let shakaPlayer = null;
+    let lastScrollLineId = null; 
+    let searchResultsCache = [];
+    let activeServerCache = "";
+    let lyricsSkipCount = 0;
+    let longPressTimer;
+
+    // --- SERVERS ---
+    const SERVERS = [
+        "https://triton.squid.wtf",
+        "https://maus.qqdl.site",
+        "https://vogel.qqdl.site",
+        "https://katze.qqdl.site",
+        "https://hund.qqdl.site"
+    ];
+
+    // Updated Lyrics APIs
+    const LYRICS_APIS = [
+        { name: "Lyrics Plus (Vercel)", url: 'https://lyrics-plus-backend.vercel.app/v1/ttml/get', type: "standard" },
+        { name: "Lrclib", url: 'https://lrclib.net/api/get', type: "lrclib" },
+        { name: "Boidu API", url: 'https://lyrics-api.boidu.dev/getLyrics', type: "boidu" },
+        { name: "Lyrics Plus (Prjkt)", url: 'https://lyricsplus.prjktla.workers.dev/v1/ttml/get', type: "standard" }
+    ];
+
+    let currentMetadata = { title: "", artist: "", album: "", coverUrl: "", lyrics: "", downloadUrl: "" };
+
+    // --- SHAKA INIT ---
+    async function initShaka() {
+        shaka.polyfill.installAll();
+        if (shaka.Player.isBrowserSupported()) {
+            shakaPlayer = new shaka.Player(audio);
+            shakaPlayer.addEventListener('error', (e) => console.error('Shaka Error', e));
+        }
+    }
+    document.addEventListener('DOMContentLoaded', initShaka);
+
+    // --- THUMBS DOWN LOGIC (LONG PRESS) ---
+    badLyricsBtn.addEventListener('mousedown', startLongPress);
+    badLyricsBtn.addEventListener('touchstart', startLongPress);
+    badLyricsBtn.addEventListener('mouseup', cancelLongPress);
+    badLyricsBtn.addEventListener('mouseleave', cancelLongPress);
+    badLyricsBtn.addEventListener('touchend', cancelLongPress);
+
+    function startLongPress(e) {
+        longPressTimer = setTimeout(() => {
+            openSources();
+        }, 800); 
+    }
+
+    function cancelLongPress(e) {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+            if (e.type === 'mouseup' || e.type === 'touchend') {
+               nextLyrics();
+            }
+        }
+    }
+
+    function openSources() {
+        if (longPressTimer) clearTimeout(longPressTimer);
+        longPressTimer = null;
+        sourcesModal.style.display = 'flex';
+        const list = document.getElementById('sources-list');
+        list.innerHTML = "";
+        
+        LYRICS_APIS.forEach(api => {
+            const btn = document.createElement('div');
+            btn.className = 'source-btn';
+            btn.innerText = api.name;
+            btn.onclick = () => selectApiSource(api);
+            list.appendChild(btn);
+        });
+    }
+
+    function closeSources() { sourcesModal.style.display = 'none'; }
+
+    async function selectApiSource(apiObj) {
+        closeSources();
+        setStatus("Fetching...");
+        lScroll.innerHTML = "<div class='unsynced-text'>Fetching from selected source...</div>";
+        const { artist, title } = cleanMetadata(currentMetadata.artist, currentMetadata.title);
+        
+        await fetchSingleSource(apiObj, artist, title, true);
+    }
+
+    // --- VIEW CONTROLS ---
+    function toggleView() {
+        isLyricsMode = !isLyricsMode;
+        if(isLyricsMode) {
+            document.body.classList.add('lyrics-active');
+            iconMsg.style.display = 'none'; iconArt.style.display = 'block';
+        } else {
+            document.body.classList.remove('lyrics-active');
+            iconMsg.style.display = 'block'; iconArt.style.display = 'none';
+        }
+    }
+
+    function toggleGloom() {
+        isGloomActive = !isGloomActive;
+        if(isGloomActive) {
+            document.body.classList.remove('no-gloom');
+            gloomBtn.classList.add('active-gloom'); gloomBtn.style.opacity = "1";
+        } else {
+            document.body.classList.add('no-gloom');
+            gloomBtn.classList.remove('active-gloom'); gloomBtn.style.opacity = "0.4";
+            document.querySelectorAll('.k-word').forEach(w => w.style.textShadow = 'none');
+        }
+    }
+
+    function setStatus(msg) { statusLbl.innerText = msg; }
+
+    // --- SEARCH LOGIC ---
+    function openSearch() { 
+        searchModal.style.display = 'flex'; 
+        document.getElementById('search-input').style.display = 'block';
+        document.getElementById('search-input').focus(); 
+        searchResultsContainer.style.display = 'none';
+        document.querySelector('.modal-btns').style.display = 'flex';
+    }
+    
+    function closeSearch() { 
+        searchModal.style.display = 'none'; 
+        document.getElementById('loading-msg').style.display = 'none'; 
+    }
+    
+    function handleSearch(e) { if(e.key === 'Enter') triggerSearch(); }
+
+    async function triggerSearch() {
+        const queryInput = document.getElementById('search-input').value;
+        if(!queryInput) return;
+        document.getElementById('loading-msg').style.display = 'block';
+        searchResultsContainer.style.display = 'none';
+        setStatus("Searching...");
+
+        try {
+            let searchTeam = queryInput;
+            if(queryInput.includes('youtube.com') || queryInput.includes('youtu.be')) {
+                 try {
+                    const noEmbedResp = await fetch(`https://noembed.com/embed?url=${queryInput}`);
+                    const noEmbedJson = await noEmbedResp.json();
+                    if(noEmbedJson.title) searchTeam = noEmbedJson.title.replace('(Official Video)','').replace('[Official Audio]','').replace(/\(.*\)/,'').trim();
+                } catch(err) {}
+            }
+
+            let searchJson = null;
+            let activeServer = "";
+            for (const server of SERVERS) {
+                try {
+                    const resp = await fetch(`${server}/search/?s=${encodeURIComponent(searchTeam)}`);
+                    if(!resp.ok) continue;
+                    const text = await resp.text();
+                    if(text.startsWith('{')) {
+                        const json = JSON.parse(text);
+                        if(json.data && json.data.items && json.data.items.length > 0) {
+                            searchJson = json;
+                            activeServer = server;
+                            break; 
+                        }
+                    }
+                } catch(e) {}
+            }
+
+            if(!searchJson) { alert("Song not found."); document.getElementById('loading-msg').style.display = 'none'; return; }
+            
+            // Render Results List
+            searchResultsCache = searchJson.data.items.slice(0, 5); 
+            activeServerCache = activeServer;
+            renderSearchResults();
+            
+        } catch(e) {
+            alert("Error: " + e.message);
+            document.getElementById('loading-msg').style.display = 'none';
+        }
+    }
+
+    function renderSearchResults() {
+        document.getElementById('loading-msg').style.display = 'none';
+        document.getElementById('search-input').style.display = 'none'; 
+        document.querySelector('.modal-btns').style.display = 'none'; 
+        searchResultsContainer.innerHTML = "";
+        
+        searchResultsCache.forEach((song, index) => {
+            const cover = song.album?.cover ? `https://resources.tidal.com/images/${song.album.cover.replace(/-/g, '/')}/320x320.jpg` : "";
+            const el = document.createElement('div');
+            el.className = 'search-result-item';
+            el.innerHTML = `
+                <img src="${cover}" class="res-img">
+                <div class="res-info">
+                    <div class="res-title">${song.title}</div>
+                    <div class="res-artist">${song.artists[0]?.name || "Unknown"}</div>
+                </div>
+            `;
+            el.onclick = () => selectSearchResult(index);
+            searchResultsContainer.appendChild(el);
+        });
+        
+        searchResultsContainer.style.display = 'flex';
+    }
+
+    async function selectSearchResult(index) {
+        const song = searchResultsCache[index];
+        const trackId = song.id;
+        const title = song.title;
+        const artist = song.artists[0]?.name || "Unknown";
+        const cover = song.album?.cover || "";
+        const albumName = song.album?.title || "Unknown Album";
+
+        setStatus("Fetching Audio...");
+        try {
+            const trackData = await fetchTrackWithFallback(activeServerCache, trackId, currentQuality);
+            if(!trackData) throw new Error("Could not load track.");
+
+            const fullCoverUrl = cover ? `https://resources.tidal.com/images/${cover.replace(/-/g, '/')}/1280x1280.jpg` : "";
+
+            await playOnline(trackData.url, title, artist, albumName, fullCoverUrl, trackData.bitDepth, trackData.sampleRate, trackData.audioQuality, trackData.isDash);
+            
+            closeSearch();
+            lyricsSkipCount = 0; 
+            fetchOnlineLyrics(artist, title, 0);
+        } catch(e) {
+            alert("Failed to load song: " + e.message);
+            closeSearch();
+        }
+    }
+
+    async function fetchTrackWithFallback(server, id, requestedQuality) {
+        const qualities = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"];
+        let startIndex = qualities.indexOf(requestedQuality);
+        if(startIndex === -1) startIndex = 0;
+        for (let i = startIndex; i < qualities.length; i++) {
+            try {
+                const resp = await fetch(`${server}/track/?id=${id}&quality=${qualities[i]}`);
+                const json = await resp.json();
+                const b64 = json.data?.manifest;
+                if (b64) {
+                    const decoded = atob(b64);
+                    if (decoded.trim().startsWith('<')) {
+                        const blob = new Blob([decoded], { type: 'application/dash+xml' });
+                        return { url: URL.createObjectURL(blob), isDash: true, bitDepth: json.data.bitDepth, sampleRate: json.data.sampleRate, audioQuality: json.data.audioQuality };
+                    } else {
+                        const mJson = JSON.parse(decoded);
+                        if(mJson.urls && mJson.urls[0]) return { url: mJson.urls[0], isDash: false, bitDepth: json.data.bitDepth, sampleRate: json.data.sampleRate, audioQuality: json.data.audioQuality };
+                    }
+                }
+            } catch (err) {}
+        }
+        return null;
+    }
+
+    async function playOnline(url, title, artist, album, coverUrl, bitDepth, sampleRate, audioQual, isDash) {
+        if (shakaPlayer) await shakaPlayer.unload();
+        currentMetadata = { title, artist, album, coverUrl, lyrics: "", downloadUrl: isDash ? "" : url };
+
+        if (isDash && shakaPlayer) {
+            try { await shakaPlayer.load(url); audio.play(); } 
+            catch (e) { alert("Playback Failed"); return; }
+        } else {
+            audio.src = url; audio.play();
+        }
+
+        document.getElementById('title').innerText = title + " - " + artist;
+        setStatus("Playing");
+        
+        let techText = "";
+        if(bitDepth && sampleRate) {
+             const khz = sampleRate / 1000;
+             techText = `${bitDepth}-bit • ${khz}kHz`;
+        } else if (audioQual === "HIGH") techText = "AAC 320kbps";
+        else techText = "HQ";
+        
+        techInfo.innerText = techText;
+        techInfo.style.display = "inline-block";
+        
+        techInfo.style.color = ""; techInfo.style.backgroundColor = ""; 
+        if (techText.includes("24-bit")) {
+            techInfo.style.color = "#d48aff"; techInfo.style.backgroundColor = "rgba(178, 87, 255, 0.2)";
+        } else if (techText.includes("AAC")) {
+            techInfo.style.color = "#00e5ff"; techInfo.style.backgroundColor = "rgba(0, 229, 255, 0.2)";
+        } else {
+            techInfo.style.color = "#FFD700"; techInfo.style.backgroundColor = "rgba(255, 215, 0, 0.15)";
+        }
+
+        if(coverUrl) {
+            document.getElementById('art-img').src = coverUrl;
+            document.getElementById('art-img').style.display = 'block';
+            document.getElementById('art-ph').style.display = 'none';
+            const bgUrl = `url(${coverUrl})`;
+            document.getElementById('bg-layer').style.backgroundImage = bgUrl;
+            document.getElementById('blob-1').style.backgroundImage = bgUrl;
+            document.getElementById('blob-2').style.backgroundImage = bgUrl;
+        }
+        iconPlay.style.display = 'none'; iconPause.style.display = 'block';
+    }
+
+    function cleanMetadata(artist, title) {
+        let cleanArtist = artist || "";
+        cleanArtist = cleanArtist.replace(" - Topic", "").replace(/VEVO/ig, "").trim();
+        let cleanTitle = title || "";
+        cleanTitle = cleanTitle.replace(/[\(\[].*?[\)\]]/g, "").replace(/\s*ft\.?.*$/i, "").replace(/\s*feat\.?.*$/i, "");
+        return { artist: cleanArtist.trim(), title: cleanTitle.trim() };
+    }
+
+    function nextLyrics() {
+        lyricsSkipCount++;
+        setStatus("Trying Next Lyrics...");
+        fetchOnlineLyrics(currentMetadata.artist, currentMetadata.title, lyricsSkipCount);
+    }
+
+    async function fetchOnlineLyrics(rawArtist, rawTitle, skip = 0) {
+        setStatus("Lyrics...");
+        if(skip === 0) lScroll.innerHTML = "<div class='unsynced-text'>Searching Lyrics...</div>";
+        const { artist, title } = cleanMetadata(rawArtist, rawTitle);
+
+        let foundCount = 0;
+        let finalLrc = null;
+
+        for (const apiObj of LYRICS_APIS) {
+            const result = await fetchSingleSource(apiObj, artist, title, false);
+            if (result) {
+                if (foundCount === skip) {
+                    finalLrc = result;
+                    break;
+                }
+                foundCount++;
+            }
+        }
+
+        if(finalLrc) {
+            currentMetadata.lyrics = finalLrc;
+            parseLyrics(finalLrc);
+            setStatus("Synced");
+        } else {
+            if(skip > 0 && foundCount === 0) {
+                alert("No more lyrics found.");
+                lyricsSkipCount = 0; 
+            } else {
+                setStatus("No Lyrics");
+                lScroll.innerHTML = "<div class='unsynced-text'>No Synced Lyrics Found</div>";
+                currentMetadata.lyrics = "";
+            }
+        }
+    }
+
+    async function fetchSingleSource(apiObj, artist, title, forceApply) {
+        try {
+            const url = new URL(apiObj.url);
+            
+            // Handle Parameter Logic per API type
+            if (apiObj.type === "lrclib") {
+                url.searchParams.append("artist_name", artist);
+                url.searchParams.append("track_name", title);
+            } else if (apiObj.type === "boidu") {
+                url.searchParams.append("a", artist);
+                url.searchParams.append("s", title);
+                url.searchParams.append("d", audio.duration || 0); // Boidu needs duration often
+            } else {
+                // Standard for Lyrics Plus mirrors
+                url.searchParams.append("artist", artist);
+                url.searchParams.append("title", title);
+                url.searchParams.append("req_auth", "false");
+            }
+
+            const res = await fetch(url.toString());
+            if(res.ok) {
+                const data = await res.json();
+                
+                // Lrclib handler
+                if (apiObj.type === "lrclib") {
+                    if (data && data.syncedLyrics) {
+                        if (forceApply) {
+                            currentMetadata.lyrics = data.syncedLyrics;
+                            parseLyrics(data.syncedLyrics);
+                            setStatus("Synced (Lrclib)");
+                        }
+                        return data.syncedLyrics;
+                    } else if (Array.isArray(data) && data.length > 0 && data[0].syncedLyrics) {
+                         // Lrclib sometimes returns array on search
+                        if (forceApply) {
+                            currentMetadata.lyrics = data[0].syncedLyrics;
+                            parseLyrics(data[0].syncedLyrics);
+                            setStatus("Synced (Lrclib)");
+                        }
+                        return data[0].syncedLyrics;
+                    }
+                } 
+                // Standard TTML/JSON handler (Boidu & Lyrics Plus)
+                else if (data && data.ttml) {
+                    const lrc = ttmlToLrc(data.ttml);
+                    if(lrc && lrc.length > 20) {
+                        if (forceApply) {
+                            currentMetadata.lyrics = lrc;
+                            parseLyrics(lrc);
+                            setStatus("Synced (Manual)");
+                        }
+                        return lrc;
+                    }
+                }
+            }
+        } catch(e) {}
+        return null;
+    }
+
+    function ttmlToLrc(ttmlStr) {
+        try {
+            ttmlStr = ttmlStr.replace(/\sxmlns="[^"]+"/g, '');
+            const parser = new DOMParser();
+            const xml = parser.parseFromString(ttmlStr, "text/xml");
+            const body = xml.querySelector("body");
+            if (!body) return "";
+            
+            const pt = (t) => {
+                if (!t) return 0;
+                if (t.includes(":")) { const parts = t.split(":"); return (parseInt(parts[0]) * 60) + parseFloat(parts[1]); }
+                return parseFloat(t.replace("s", ""));
+            };
+            const fmt = (secs) => { const m = Math.floor(secs / 60); const s = (secs % 60).toFixed(2); return `[${String(m).padStart(2,'0')}:${String(s).padStart(5,'0')}]`; };
+            const fmtTag = (secs) => { const m = Math.floor(secs / 60); const s = (secs % 60).toFixed(2); return `<${String(m).padStart(2,'0')}:${String(s).padStart(5,'0')}>`; };
+
+            let output = "";
+            body.querySelectorAll("p").forEach(p => {
+                const beginAttr = p.getAttribute("begin");
+                if (!beginAttr) return;
+                const lineTime = pt(beginAttr);
+                let lineStr = "";
+                p.childNodes.forEach(node => {
+                    if (node.nodeType === 3) lineStr += node.textContent;
+                    else if (node.nodeName.toLowerCase() === "span") {
+                        const wBegin = node.getAttribute("begin");
+                        const wText = node.textContent;
+                        if (wBegin) lineStr += `${fmtTag(pt(wBegin))}${wText}`; else lineStr += wText;
+                    }
+                });
+                const clean = p.textContent.trim();
+                if (clean.startsWith('(') && clean.endsWith(')')) output += `[bg: ${fmtTag(lineTime)} ${lineStr.trim()}]\n`;
+                else output += `${fmt(lineTime)}${lineStr.trim()}\n`;
+            });
+            return output;
+        } catch (e) { return ""; }
+    }
+
+    async function downloadTrack() {
+        if (!currentMetadata.downloadUrl && audio.src.startsWith('blob:')) {
+            alert("Hi-Res DASH streams cannot be downloaded directly. Switch to 'Lossless' quality in settings to download."); return;
+        }
+        const src = currentMetadata.downloadUrl || audio.src;
+        if (!src) { alert("Nothing is playing!"); return; }
+        setStatus("Downloading...");
+        try {
+            const audioResp = await fetch(src);
+            const audioBuffer = await audioResp.arrayBuffer();
+            let coverBuffer = null;
+            if (currentMetadata.coverUrl) {
+                const coverResp = await fetch(currentMetadata.coverUrl);
+                if (coverResp.ok) coverBuffer = await coverResp.arrayBuffer();
+            }
+            const writer = new ID3Writer(audioBuffer);
+            writer.setFrame('TIT2', currentMetadata.title).setFrame('TPE1', [currentMetadata.artist]).setFrame('TALB', currentMetadata.album);
+            if (coverBuffer) writer.setFrame('APIC', { type: 3, data: coverBuffer, description: 'Cover', mimeType: 'image/jpeg' });
+            if (currentMetadata.lyrics) writer.setFrame('USLT', { description: '', lyrics: currentMetadata.lyrics, language: 'eng' });
+            writer.addTag();
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(writer.getBlob());
+            link.download = `${currentMetadata.artist} - ${currentMetadata.title}.flac`;
+            link.click();
+            setStatus("Saved!");
+            setTimeout(() => setStatus("Playing"), 2000);
+        } catch (e) { alert("Download Failed"); setStatus("Error"); }
+    }
+
+    // --- ULTIMATE PARSER (Synced with music_player.htm logic) ---
+    function parseLyrics(text) {
+        lyricsData = [];
+        lScroll.innerHTML = ""; lScroll.scrollTop = 0; lastScrollLineId = null;
+        
+        if (!text || text.length === 0) { setStatus("No Lyrics"); return; }
+
+        isEnhanced = /<\d{2}:\d{2}/.test(text);
+        if (!/\[\d{2}:\d{2}/.test(text) && !text.includes('[bg:')) {
+            setStatus("Unsynced Lyrics");
+            lScroll.className = ""; lScroll.innerHTML = `<div class="unsynced-text">${text}</div>`;
+            return;
+        }
+
+        setStatus(isEnhanced ? "Enhanced Lyrics" : "Standard Lyrics");
+        lScroll.className = isEnhanced ? "mode-enhanced" : "mode-standard";
+
+        const lines = text.split(/\r?\n/);
+        const lineTimeReg = /\[(\d{2}):(\d{2})(\.\d+)?>?\]?/;
+        const tagReg = /<(\d{2}):(\d{2})(\.\d+)?>/;
+        
+        let lastMainLine = null;
+        let globalIdx = 0;
+
+        lines.forEach((line) => {
+            let currentTime = 0;
+            let raw = "";
+            let isBg = false;
+
+            const stdMatch = lineTimeReg.exec(line);
+            const isBgMatch = line.trim().toLowerCase().startsWith('[bg:');
+
+            if (isBgMatch) {
+                isBg = true;
+                raw = line.replace(/^\[bg:/i, '').replace(/\]$/, '').trim();
+                const firstTag = tagReg.exec(raw);
+                if (firstTag) {
+                    currentTime = parseInt(firstTag[1])*60 + parseInt(firstTag[2]) + (firstTag[3]?parseFloat(firstTag[3]):0);
+                } else if (stdMatch) {
+                    currentTime = parseInt(stdMatch[1])*60 + parseInt(stdMatch[2]) + (stdMatch[3]?parseFloat(stdMatch[3]):0);
+                }
+            } else if (stdMatch) {
+                currentTime = parseInt(stdMatch[1])*60 + parseInt(stdMatch[2]) + (stdMatch[3]?parseFloat(stdMatch[3]):0);
+                raw = line.replace(lineTimeReg, '').trim();
+                if (raw.startsWith('(') && raw.endsWith(')')) isBg = true;
+            } else { return; }
+
+            if(isNaN(currentTime)) currentTime = 0;
+
+            let voice = 'v3';
+            let cleanRaw = raw;
+            const lower = raw.toLowerCase();
+            // Voice Tag Parsing
+            if (lower.startsWith('v1') || lower.startsWith('[v1]')) {
+                voice = 'v1'; cleanRaw = raw.replace(/^\[?v1\]?:?/i, '').trim();
+            } else if (lower.startsWith('v2') || lower.startsWith('[v2]')) {
+                voice = 'v2'; cleanRaw = raw.replace(/^\[?v2\]?:?/i, '').trim();
+            }
+
+            let words = [];
+            let maxTime = currentTime; 
+
+            if (isEnhanced) {
+                const parts = cleanRaw.split(/(<\d{2}:\d{2}(?:\.\d+)?>)/);
+                parts.forEach(part => {
+                    if(!part) return;
+                    if (tagReg.test(part)) {
+                        const m = tagReg.exec(part);
+                        const t = parseInt(m[1])*60 + parseInt(m[2]) + (m[3]?parseFloat(m[3]):0);
+                        if(!isNaN(t)) { currentTime = t; if(t > maxTime) maxTime = t; } 
+                    } else {
+                        if(part.length > 0) words.push({ text: part, time: currentTime });
+                    }
+                });
+            } else {
+                words.push({ text: cleanRaw, time: currentTime });
+            }
+
+            if(words.length === 0) return;
+
+            // Pre-calc duration (inter-word)
+            if (isEnhanced) {
+                for(let i=0; i<words.length; i++) {
+                    if (i < words.length - 1) words[i].duration = words[i+1].time - words[i].time;
+                    else words[i].duration = 0; // Fixed later
+                    if(words[i].duration <= 0) words[i].duration = 0.5; 
+                }
+            }
+
+            // --- HTML GENERATION ---
+            if (isBg && lastMainLine) {
+                 const bgObj = {
+                    id: 'bg-' + globalIdx++,
+                    startTime: words[0].time,
+                    endTime: maxTime + 0, // Loose end time for bg
+                    words: words
+                };
+                lastMainLine.bgLines.push(bgObj);
+                const mainRow = document.getElementById(`l-${lastMainLine.id}`);
+                const bubble = mainRow.querySelector('.bubble');
+                const bgDiv = document.createElement('div');
+                bgDiv.className = 'bg-line'; 
+                bgDiv.id = bgObj.id;
+                let html = "";
+                words.forEach((w, wIdx) => { html += `<span class="k-word" id="w-${bgObj.id}-${wIdx}">${w.text}</span>`; });
+                bgDiv.innerHTML = html;
+                bubble.appendChild(bgDiv);
+            } else {
+                const row = document.createElement('div');
+                row.className = `l-row ${voice}`; 
+                const lid = `line-${globalIdx++}`;
+                row.id = `l-${lid}`; 
+                
+                let html = `<div class="bubble">`;
+                words.forEach((w, wIdx) => { html += `<span class="k-word" id="w-${lid}-${wIdx}">${w.text}</span>`; });
+                html += `</div>`;
+                row.innerHTML = html;
+                row.onclick = (e) => { e.stopPropagation(); audio.currentTime = words[0].time; audio.play(); };
+                lScroll.appendChild(row);
+
+                let explicitEnd = (isEnhanced && maxTime > words[0].time + 0.1) ? maxTime : -1;
+                const mainObj = { id: lid, startTime: words[0].time, explicitEnd: explicitEnd, words: words, bgLines: [], voiceClass: voice };
+                lyricsData.push(mainObj);
+                lastMainLine = mainObj;
+            }
+        });
+
+        // --- POST-PROCESS: FIX LAST WORD DURATION (THE KEY FIX) ---
+        for(let i=0; i<lyricsData.length; i++) {
+            const curr = lyricsData[i];
+            const next = lyricsData[i+1];
+            
+            if (curr.explicitEnd > 0) curr.endTime = curr.explicitEnd;
+            else curr.endTime = next ? next.startTime : (curr.startTime + 5); 
+            
+            if(isEnhanced) {
+                const lastWord = curr.words[curr.words.length-1];
+                if(lastWord) {
+                    let duration = curr.endTime - lastWord.time;
+                    if(duration <= 0) duration = 1.0; 
+                    lastWord.duration = duration;
+                }
+            }
+        }
+    }
+
+    // --- ANIMATION ENGINE (FROM UPLOADED FILE) ---
+    function updateState() {
+        if(lyricsData.length === 0) return;
+        const t = audio.currentTime + latencyOffset; 
+
+        let activeIndices = [];
+        for(let i=0; i<lyricsData.length; i++) {
+            let line = lyricsData[i];
+            let isMainActive = (t >= line.startTime && t < line.endTime);
+            let isBgActive = false;
+            
+            if (line.bgLines && line.bgLines.length > 0) {
+                for (let bg of line.bgLines) {
+                    if (t >= bg.startTime && t <= bg.endTime) { isBgActive = true; break; }
+                }
+            }
+            if (isMainActive || isBgActive) activeIndices.push(i);
+        }
+
+        // Auto Scroll
+        if (activeIndices.length > 0 && !isDragging && isLyricsMode) {
+            const currentLineId = lyricsData[activeIndices[0]].id;
+            if (lastScrollLineId !== currentLineId) {
+                const anchorRow = document.getElementById(`l-${currentLineId}`);
+                if (anchorRow) {
+                    anchorRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    lastScrollLineId = currentLineId;
+                }
+            }
+        }
+
+        lyricsData.forEach((line, idx) => {
+            const row = document.getElementById(`l-${line.id}`); 
+            if(!row) return;
+            const isActive = activeIndices.includes(idx);
+            
+            if (isActive) {
+                if(!row.classList.contains('active')) row.classList.add('active');
+                if(row.classList.contains('past')) row.classList.remove('past');
+                if(isEnhanced) animateWords(line.words, line.id, t);
+            } else {
+                if(row.classList.contains('active')) row.classList.remove('active');
+                let isPast = false;
+                if (activeIndices.length > 0) isPast = idx < activeIndices[0]; else isPast = t > line.endTime;
+
+                if (isPast) {
+                    if(!row.classList.contains('past')) {
+                        row.classList.add('past');
+                        if(isEnhanced) markAllSung(line.words, line.id);
+                    }
+                } else {
+                    if(row.classList.contains('past')) row.classList.remove('past');
+                    if(isEnhanced) resetAllWords(line.words, line.id);
+                }
+            }
+            
+            // Background Line Visibility & Animation
+            if (line.bgLines && line.bgLines.length > 0) {
+                 line.bgLines.forEach(bg => {
+                    const bgDiv = document.getElementById(bg.id);
+                    if(!bgDiv) return;
+                    if (t >= bg.startTime && t <= bg.endTime) {
+                         if(!bgDiv.classList.contains('visible')) bgDiv.classList.add('visible');
+                         if(isEnhanced) animateWords(bg.words, bg.id, t);
+                    } else {
+                        if(bgDiv.classList.contains('visible')) bgDiv.classList.remove('visible');
+                    }
+                });
+            }
+        });
+    }
+
+    function animateWords(words, prefixId, t) {
+        words.forEach((w, wIdx) => {
+            const span = document.getElementById(`w-${prefixId}-${wIdx}`);
+            if(!span) return;
+            const wEnd = w.time + w.duration;
+            
+            if (t >= w.time && t < wEnd) {
+                // Wiping
+                const p = (t - w.time) / w.duration;
+                span.classList.add('swiping'); span.classList.remove('sung');
+                span.style.setProperty('--p', (p * 100) + '%');
+                
+                // Lift Effect (The 0.32s feel)
+                if (w.duration > TIME_THRESHOLD) {
+                    // Dynamic lift based on progress
+                    const lift = -2.5 * p; 
+                    span.style.transform = `translate3d(0, ${lift}px, 0) scale(1)`;
+                } else {
+                     span.style.transform = `translate3d(0, 0, 0) scale(1)`;
+                }
+
+                // Gloom Effect
+                if (isGloomActive && w.duration > TIME_THRESHOLD) {
+                    const glow = Math.min(Math.max(w.duration * 20, 10), 40);
+                    span.style.textShadow = `0 0 ${glow * p}px rgba(255, 255, 255, ${p})`;
+                } else {
+                    span.style.textShadow = 'none';
+                }
+            } else if (t >= wEnd) {
+                // Sung
+                span.classList.add('sung'); span.classList.remove('swiping');
+                span.style.textShadow = 'none'; span.style.removeProperty('--p');
+                if (w.duration > TIME_THRESHOLD) span.style.transform = `translate3d(0,-2.5px,0) scale(1)`; 
+                else span.style.transform = `translate3d(0,-2px,0) scale(1)`;
+            } else {
+                // Future
+                span.classList.remove('sung'); span.classList.remove('swiping');
+                span.style.textShadow = 'none'; span.style.setProperty('--p', '0%');
+                span.style.transform = `translate3d(0, 0, 0) scale(1)`;
+            }
+        });
+    }
+
+    function markAllSung(words, prefixId) {
+        words.forEach((w, wIdx) => {
+            const s = document.getElementById(`w-${prefixId}-${wIdx}`);
+            if(s) { 
+                s.classList.add('sung'); s.classList.remove('swiping');
+                s.style.textShadow = 'none'; s.style.removeProperty('--p'); 
+                if (w.duration > TIME_THRESHOLD) s.style.transform = `translate3d(0,-2.5px,0) scale(1)`;
+                else s.style.transform = `translate3d(0,-2px,0) scale(1)`; 
+            }
+        });
+    }
+
+    function resetAllWords(words, prefixId) {
+        words.forEach((w, wIdx) => {
+            const s = document.getElementById(`w-${prefixId}-${wIdx}`);
+            if(s) { 
+                s.classList.remove('sung'); s.classList.remove('swiping');
+                s.style.textShadow = 'none'; s.style.setProperty('--p', '0%'); 
+                s.style.transform = `translate3d(0,0,0) scale(1)`; 
+            }
+        });
+    }
+
+    function syncLoop() {
+        requestAnimationFrame(syncLoop);
+        if(audio.paused && !isDragging) return;
+        if(!isDragging) { seekSlider.value = (audio.currentTime / audio.duration) * 100 || 0; updateState(); }
+    }
+    syncLoop();
+
+    function togglePlay() { 
+        if(audio.paused) { audio.play(); iconPlay.style.display='none'; iconPause.style.display='block'; } 
+        else { audio.pause(); iconPlay.style.display='block'; iconPause.style.display='none'; } 
+    }
+    function skip(s) { audio.currentTime += s; updateState(); }
+    seekSlider.onmousedown = () => { isDragging = true; };
+    seekSlider.ontouchstart = () => { isDragging = true; };
+    const endDrag = (e) => { isDragging = false; const newTime = (e.target.value / 100) * audio.duration; audio.currentTime = newTime; updateState(); if(audio.paused) audio.play(); };
+    seekSlider.onchange = endDrag; seekSlider.onmouseup = endDrag; seekSlider.ontouchend = endDrag;
+    
+    // --- SETTINGS ---
+    function openEdit() { editModal.style.display = 'flex'; }
+    function closeEdit() { editModal.style.display = 'none'; }
+    function saveEdit() { const text = lrcInput.value; if(text.trim()) { parseLyrics(text); currentMetadata.lyrics = text; setStatus("Custom Lyrics"); if(!isLyricsMode) toggleView(); } closeEdit(); }
+    function openSettings() { settingsModal.style.display = 'flex'; }
+    function closeSettings() { settingsModal.style.display = 'none'; }
+    function updateSpeed() { const val = parseFloat(document.getElementById('set-speed').value); audio.playbackRate = val; document.getElementById('disp-speed').innerText = val.toFixed(2) + "x"; }
+    function updateOffset() { const val = parseFloat(document.getElementById('set-offset').value); latencyOffset = val; document.getElementById('disp-offset').innerText = (val>0?"+":"") + val.toFixed(2) + "s"; }
+    function updateBlur() { const val = parseInt(document.getElementById('set-blur').value); document.getElementById('bg-layer').style.filter = `blur(${val}px) brightness(0.3)`; const blobs = document.querySelectorAll('.live-blob'); blobs.forEach(b => { b.style.filter = `blur(${20+val}px) saturate(1.8) brightness(0.8)`; }); document.getElementById('disp-blur').innerText = val < 30 ? "Sharp" : val > 80 ? "Abstract" : "Medium"; }
+    function toggleBgGraphics() { const chk = document.getElementById('set-bg-toggle'); document.body.classList.toggle('hide-graphics', !chk.checked); }
+    function updateQuality() { currentQuality = document.getElementById('set-quality').value; }
+    function resetSettings() { document.getElementById('set-speed').value = 1.0; updateSpeed(); document.getElementById('set-offset').value = 0.05; updateOffset(); document.getElementById('set-blur').value = 60; updateBlur(); document.getElementById('set-bg-toggle').checked = true; toggleBgGraphics(); document.getElementById('set-quality').value = "HI_RES_LOSSLESS"; updateQuality(); }
+</script>
+</body>
+</html>
